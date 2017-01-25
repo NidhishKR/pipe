@@ -1,0 +1,317 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  VPC:
+    Type: String
+    Description: Provide the VPC ID.
+  TagName:
+    Type: String
+    Description: Tag Name of your Infrastructure.
+  ECSClusterName:
+    Type: String
+    Description: Name of an existing ECS Cluster.
+  PublicSubnetAZ1:
+    Description: Public Subnet ID in Availability Zone 1.
+    Type: String
+  PublicSubnetAZ2:
+    Description: Public Subnet ID in Availability Zone 2.
+    Type: String
+  PublicSecurityGroupID:
+    Description: Public Security Group ID for LoadBalancer.
+    Type: String
+Resources:
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-', [todoLogGroup, !Ref 'AWS::StackName']]
+      RetentionInDays: 14
+  todoTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: mongo
+      ContainerDefinitions:
+      - Name: mongo
+        Cpu: '256'
+        Essential: 'true'
+        Image: mongo
+        Memory: '128'
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref 'CloudwatchLogsGroup'
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: mongo
+        PortMappings:
+        - ContainerPort: 27017
+          HostPort: 0
+      - Name: node-todo
+        Cpu: '256'
+        Essential: 'true'
+        Image: nidhishkr/node-todo
+        Memory: '128'
+        Links: ["mongo"]
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref 'CloudwatchLogsGroup'
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: nidhishkr/node-tod
+        PortMappings:
+        - ContainerPort: 7070
+          HostPort: 0
+      Volumes:
+      - Name: my-vol
+  todoService:
+    Type: AWS::ECS::Service
+    DependsOn: todoALBListener
+    Properties:
+     Cluster: !Ref 'ECSClusterName'
+     DesiredCount: '1'
+     LoadBalancers:
+     - ContainerName: node-todo
+       ContainerPort: '7070'
+       TargetGroupArn: !Ref 'todoTargetGroup'
+     Role: !Ref 'ECSServiceRole'
+     TaskDefinition: !Ref 'todoTaskDefinition'
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+  ECSServicePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "ecs-service"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: ['elasticloadbalancing:*', 'ec2:*']
+            Resource: '*'
+      Roles: [!Ref 'ECSServiceRole']
+  todoALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: todo-ALB
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '30'
+      Subnets:
+        - !Ref PublicSubnetAZ1
+        - !Ref PublicSubnetAZ2
+      SecurityGroups:
+        - !Ref PublicSecurityGroupID
+  todoTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: todoALB
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Name: todo
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${TagName}-VpcId"
+  todoALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: ECSServiceRole
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref 'todoTargetGroup'
+      LoadBalancerArn: !Ref 'todoALB'
+      Port: '80'
+      Protocol: HTTP
+  ECSALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: todoALBListener
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'todoTargetGroup'
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref 'todoALBListener'
+      Priority: 1
+  todoAPI:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Description: "Demo API for todo application"
+      Name: "todoAPI"
+      BodyS3Location:
+        Bucket: cf-templates-15tu8sue4zhs7-us-east-1
+        # ETag: String
+        Key: todoSwagger.yaml
+        # Version: String
+  todoApiResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref todoAPI
+      ParentId: !GetAtt [todoAPI, RootResourceId]
+      PathPart: 'api'
+  todoTodosResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref todoAPI
+      ParentId: !Ref todoApiResource
+      PathPart: 'todos'
+  todoTodoIdResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref todoAPI
+      ParentId: !Ref todoTodosResource
+      PathPart: '{todo_id}'
+  todoDeleteMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref todoAPI
+      ResourceId: !Ref todoTodo_idResource
+      HttpMethod: DELETE
+      AuthorizationType: "NONE"
+      ApiKeyRequired: "true"
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: DELETE
+        Uri: !Join ['', ["http://", !GetAtt todoALB.DNSName, "/api/todos/{todo_id}"]]
+  todoGetALBMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref todoAPI
+      ResourceId: !GetAtt [todoAPI, RootResourceId]
+      HttpMethod: GET
+      AuthorizationType: "NONE"
+      ApiKeyRequired: "true"
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: GET
+        Uri: !Join ['', ["http://", !GetAtt todoALB.DNSName]]
+  apiGatewayMethod3:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref apiGatewayAPI
+      ResourceId: !Ref apiGatewayResource
+      HttpMethod: PATCH
+      AuthorizationType: "NONE"
+      ApiKeyRequired: "true"
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: PATCH
+        Uri: !Join ['', ["http://", !GetAtt apiGatewayALB.DNSName, "/api/todos"]]
+  apiGatewayMethod4:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref apiGatewayAPI
+      ResourceId: !Ref apiGatewayResource
+      HttpMethod: PUT
+      AuthorizationType: "NONE"
+      ApiKeyRequired: "true"
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: PUT
+        Uri: !Join ['', ["http://", !GetAtt apiGatewayALB.DNSName, "/{proxy}"]]
+  apiGatewayMethod5:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref apiGatewayAPI
+      ResourceId: !Ref apiGatewayResource
+      HttpMethod: OPTIONS
+      AuthorizationType: "NONE"
+      ApiKeyRequired: "true"
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: OPTIONS
+        Uri: !Join ['', ["http://", !GetAtt apiGatewayALB.DNSName, "/{proxy}"]]
+  todoGetMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref todoAPI
+      ResourceId: !Ref todoTodosResource
+      HttpMethod: GET
+      AuthorizationType: "NONE"
+      ApiKeyRequired: "true"
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: GET
+        Uri: !Join ['', ["http://", !GetAtt todoALB.DNSName, "/api/todos"]]
+  todoPostMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref todoAPI
+      ResourceId: !Ref todoResource3
+      HttpMethod: POST
+      AuthorizationType: "NONE"
+      Integration:
+        Type: "HTTP"
+        IntegrationHttpMethod: "POST"
+        Uri: !Join ['', ["http://", !GetAtt ALB.DNSName]]
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+  APIDeployment:
+    DependsOn: todoMethod
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      RestApiId:
+        Ref: "todoAPI"
+      Description: "Deployment of todo application"
+      StageName: "DummyStage"
+  DevelopmentAPIStage:
+    Type: "AWS::ApiGateway::Stage"
+    Properties:
+      StageName: "Development"
+      Description: "Stage for Development environment"
+      RestApiId:
+        Ref: "todoAPI"
+      DeploymentId:
+        Ref: "APIDeployment"
+      MethodSettings:
+        -
+          ResourcePath: "/*"
+          HttpMethod: "*"
+          MetricsEnabled: "true"
+          DataTraceEnabled: "true"
+  UsagePlan:
+    Type: "AWS::ApiGateway::UsagePlan"
+    Properties:
+      ApiStages:
+      - ApiId: !Ref 'todoAPI'
+        Stage: !Ref 'DevelopmentAPIStage'
+      Description: Customer todoAPI's usage plan
+      Quota:
+        Limit: 5000
+        Period: MONTH
+      Throttle:
+        BurstLimit: 200
+        RateLimit: 100
+      UsagePlanName: todoAPI
+  ApiKey:
+    Type: "AWS::ApiGateway::ApiKey"
+    DependsOn:
+      - "UsagePlan"
+      - "todoMethod"
+      - "APIDeployment"
+    Properties:
+      Name: "todoAPI"
+      Description: "CloudFormation API Key todoAPI"
+      Enabled: "true"
+      StageKeys:
+        - RestApiId:
+            Ref: "todoAPI"
+          StageName: "Development"
+Outputs:
+  ecsservice:
+    Value: !Ref 'todoService'
+  todoURL:
+    Value: !Join ['', ["https://", !Ref 'todoAPI', ".execute-api.", !Ref 'AWS::Region', ".amazonaws.com"]]

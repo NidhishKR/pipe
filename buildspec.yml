@@ -1,0 +1,27 @@
+version: 0.1
+
+phases:
+  build:
+    commands:
+      - echo -n "$CODEBUILD_BUILD_ID" | sed "s/.*:\([[:xdigit:]]\{7\}\).*/\1/" > master.commit
+      - docker build -t 145725228555.dkr.ecr.us-east-1.amazonaws.com/demo:$(cat ./master.commit) .
+      # - sed -i "s@ECS_CLUSTER_NAME@${ECS_CLUSTER_NAME}@g" ecs/service.yaml
+      # - sed -i "s@TAG@$(cat ./master.commit)@g" ecs/service.yaml
+      # - sed -i "s@DOCKER_IMAGE_URI@$ECR_REPO:$(cat ./master.commit)@g" ecs/service.yaml
+
+      # - sed -i "s@PUBLIC_SUBNET_AZ1@$PUBLIC_SUBNET_AZ1@g" ecs/service.yaml
+      # - sed -i "s@PUBLIC_SUBNET_AZ2@$PUBLIC_SUBNET_AZ2@g" ecs/service.yaml
+      # - sed -i "s@VPC_ID@$VPC_ID@g" ecs/service.yaml
+
+  post_build:
+    commands:
+      # - docker images
+      # - export AWS_DEFAULT_REGION=$AWS_REGION
+      - $(aws ecr get-login --region us-east-1)
+      # - echo $ECR_REPO:$(cat ./master.commit)
+      - docker push 145725228555.dkr.ecr.us-east-1.amazonaws.com/demo:$(cat ./master.commit)
+
+artifacts:
+  files:
+    - ecs/service.yaml
+    - master.commit
